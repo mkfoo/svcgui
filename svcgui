@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+
+import sys
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gio, GLib, Gtk
+from systemd import journal
+
+LABELS = ["Unit", "Description", "Loaded", "Active", "Sub"]
+
+FILTERS = ["service", "slice", "socket", "target", "timer"]
+
+ACTIONS = ["about", "quit", "start", "restart", "stop", "refresh"]
+
+MENUBAR_XML = """
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+    <menu id="menubar">
+        <submenu>
+            <attribute name="label">File</attribute>
+            <section>
+                <item>
+                    <attribute name="label">Quit</attribute>
+                    <attribute name="action">app.quit</attribute>
+                </item>
+            </section>
+        </submenu>
+        <submenu>
+            <attribute name="label">Actions</attribute>
+            <section>
+                <item>
+                    <attribute name="label">Start</attribute>
+                    <attribute name="action">app.start</attribute>
+                </item>
+                <item>
+                    <attribute name="label">Restart</attribute>
+                    <attribute name="action">app.restart</attribute>
+                </item>
+                <item>
+                    <attribute name="label">Stop</attribute>
+                    <attribute name="action">app.stop</attribute>
+                </item>
+            </section>
+        </submenu>
+        <submenu>
+            <attribute name="label">View</attribute>
+            <section>
+                <item>
+                    <attribute name="label">Refresh</attribute>
+                    <attribute name="action">app.refresh</attribute>
+                </item>
+            </section>
+        </submenu>
+        <submenu>
+            <attribute name="label">Help</attribute>
+            <section>
+                <item>
+                    <attribute name="label">About</attribute>
+                    <attribute name="action">app.about</attribute>
+                </item>
+            </section>
+        </submenu>
+    </menu>
+</interface>
+"""
+
+
+class SvcGuiWindow(Gtk.ApplicationWindow):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.svc_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.init_toolbar()
+        self.init_list_view()
+        self.init_filter_bar()
+        self.init_log_view()
+        self.add(self.svc_box)
+
+    def init_toolbar(self):
+        toolbar = Gtk.Toolbar.new()
+
+        btn = Gtk.ToolButton.new()
+        btn.set_icon_name("media-playback-start")
+        btn.set_tooltip_text("start")
+        btn.set_action_name("app.start")
+        toolbar.insert(btn, -1)
+
+        btn = Gtk.ToolButton.new()
+        btn.set_icon_name("media-seek-backward")
+        btn.set_tooltip_text("restart")
+        btn.set_action_name("app.restart")
+        toolbar.insert(btn, -1)
+
+        btn = Gtk.ToolButton.new()
+        btn.set_icon_name("media-playback-stop")
+        btn.set_tooltip_text("stop")
+        btn.set_action_name("app.stop")
+        toolbar.insert(btn, -1)
+
+        sep = Gtk.SeparatorToolItem.new()
+        sep.set_draw(False)
+        sep.set_expand(True)
+        toolbar.insert(sep, -1)
+
+        btn = Gtk.ToolButton.new()
+        btn.set_icon_name("view-refresh")
+        btn.set_tooltip_text("refresh")
+        btn.set_action_name("app.refresh")
+        toolbar.insert(btn, -1)
+
+        self.svc_box.pack_start(toolbar, False, False, 1)
+
+    def init_list_view(self):
+        self.svc_active_filters = set()
+        self.svc_data = Gtk.ListStore(str, str, str, str, str)
+        self.svc_filter = self.svc_data.filter_new()
+        self.svc_filter.set_visible_func(self.svc_filter_fn)
+        sortable = Gtk.TreeModelSort(model=self.svc_filter)
+        treeview = Gtk.TreeView(model=sortable)
+
+        for i, label in enumerate(LABELS):
+            renderer = Gtk.CellRendererText()
+            column = Gtk.TreeViewColumn(label, renderer, text=i)
+            column.set_sort_column_id(i)
+            treeview.append_column(column)
+
+        self.svc_selection = treeview.get_selection()
+        self.svc_selection.connect("changed", self.on_selection_changed)
+        svc_list = Gtk.ScrolledWindow()
+        svc_list.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        svc_list.add(treeview)
+        svc_list.set_min_content_height(600)
+        self.svc_box.pack_start(svc_list, False, False, 1)
+
+    def init_filter_bar(self):
+        filterbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+
+        for f in FILTERS:
+            btn = Gtk.CheckButton(label=f)
+            btn.connect("toggled", self.on_filter_changed)
+            filterbar.pack_start(btn, False, False, 1)
+
+            if f == "service":
+                btn.set_active(True)
+
+        self.svc_box.pack_start(filterbar, False, False, 1)
+
+    def init_log_view(self):
+        self.svc_textview = Gtk.TextView()
+        self.svc_textview.set_monospace(True)
+        self.svc_textview.set_editable(False)
+        self.svc_textview.set_cursor_visible(False)
+        logwindow = Gtk.ScrolledWindow()
+        logwindow.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        logwindow.add(self.svc_textview)
+        logwindow.set_vexpand(True)
+        logwindow.set_min_content_height(200)
+        self.svc_box.pack_start(logwindow, False, False, 1)
+
+    def svc_load_data(self, data):
+        for row in data:
+            self.svc_data.append(row[:5])
+
+    def svc_reload_data(self, new_data):
+        for row in self.svc_data:
+            name = row[0]
+
+            if name in new_data:
+                row[:5] = new_data[name][:5]
+
+    def svc_load_logs(self):
+        unit = self.svc_get_selected()
+
+        if unit:
+            j = journal.Reader()
+            j.this_boot()
+            j.log_level(journal.LOG_INFO)
+            j.add_match(_SYSTEMD_UNIT=unit)
+
+            self.svc_textview.set_buffer(Gtk.TextBuffer.new())
+            buf = self.svc_textview.get_buffer()
+
+            for entry in j:
+                rt = entry.get("__REALTIME_TIMESTAMP")
+                ts = rt.strftime("%a %d %H:%M:%S") if hasattr(rt, "strftime") else ""
+                name = entry.get("SYSLOG_IDENTIFIER", "")
+                pid = entry.get("SYSLOG_PID", "")
+                msg = entry.get("MESSAGE", "")
+                buf.insert_at_cursor(f"{ts} {name}[{pid}]: {msg}\n", -1)
+
+    def svc_filter_fn(self, model, iter, data):
+        if self.svc_active_filters:
+            typ = model[iter][0].split(".")[-1]
+            return typ in self.svc_active_filters
+        else:
+            return True
+
+    def svc_display_error(self, error):
+        self.svc_textview.set_buffer(Gtk.TextBuffer.new())
+        buf = self.svc_textview.get_buffer()
+        buf.insert_at_cursor(f"{error}\n", -1)
+
+    def svc_get_selected(self):
+        model, treeiter = self.svc_selection.get_selected()
+
+        if treeiter:
+            row = model[treeiter]
+
+            if row and row[0]:
+                return row[0]
+
+        return None
+
+    def on_filter_changed(self, button):
+        if button.get_active():
+            self.svc_active_filters.add(button.get_label())
+        else:
+            self.svc_active_filters.remove(button.get_label())
+
+        self.svc_filter.refilter()
+
+    def on_selection_changed(self, selection):
+        self.svc_load_logs()
+
+
+class SvcGui(Gtk.Application):
+    def __init__(self, *args, **kwargs):
+        super().__init__(
+            *args,
+            application_id="test.svcgui",
+            flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE,
+            **kwargs,
+        )
+
+        self.window = None
+        self.add_main_option(
+            "dryrun",
+            ord("d"),
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            "do not run privileged commands",
+            None,
+        )
+
+    def do_startup(self):
+        Gtk.Application.do_startup(self)
+        self.bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+
+        for act in ACTIONS:
+            action = Gio.SimpleAction.new(act, None)
+            action.connect("activate", getattr(self, f"on_{act}"))
+            self.add_action(action)
+
+        builder = Gtk.Builder.new_from_string(MENUBAR_XML, -1)
+        self.set_menubar(builder.get_object("menubar"))
+
+    def do_activate(self):
+        if not self.window:
+            self.window = SvcGuiWindow(application=self, title="svcgui")
+            data = self.svc_dbus_call("ListUnits")
+            self.window.svc_load_data(data)
+
+        self.window.show_all()
+        self.window.present()
+
+    def do_command_line(self, command_line):
+        options = command_line.get_options_dict()
+        options = options.end().unpack()
+        self.dryrun = "dryrun" in options
+        self.activate()
+        return 0
+
+    def svc_dbus_call(self, method, args=None):
+        try:
+            res = self.bus.call_sync(
+                "org.freedesktop.systemd1",
+                "/org/freedesktop/systemd1",
+                "org.freedesktop.systemd1.Manager",
+                method,
+                args,
+                None,
+                Gio.DBusCallFlags.NONE,
+                -1,
+                None,
+            )
+
+            if res and len(res):
+                return res[0]
+
+            return ()
+        except Exception as e:
+            self.window.display_error(e)
+
+    def svc_dbus_call_w_params(self, method, vt, arg1, arg2):
+        if self.dryrun:
+            return
+
+        builder = GLib.VariantBuilder.new(GLib.VariantType.new(vt))
+        builder.add_value(GLib.Variant.new_string(arg1))
+        builder.add_value(GLib.Variant.new_string(arg2))
+        self.svc_dbus_call(method, builder.end())
+
+    def svc_refresh(self):
+        data = dict((t[0], t) for t in self.svc_dbus_call("ListUnits"))
+        self.window.svc_reload_data(data)
+
+    def on_about(self, action, param):
+        about_dialog = Gtk.AboutDialog(transient_for=self.window, modal=True)
+        about_dialog.present()
+
+    def on_quit(self, action, param):
+        self.quit()
+
+    def on_start(self, action, param):
+        unit = self.window.svc_get_selected()
+
+        if unit:
+            self.svc_dbus_call_w_params("StartUnit", "(ss)", unit, "replace")
+            self.svc_refresh()
+
+    def on_restart(self, action, param):
+        unit = self.window.svc_get_selected()
+
+        if unit:
+            self.svc_dbus_call_w_params(
+                "ReloadOrTryRestartUnit", "(ss)", unit, "replace"
+            )
+            self.svc_refresh()
+
+    def on_stop(self, action, param):
+        unit = self.window.svc_get_selected()
+
+        if unit:
+            self.svc_dbus_call_w_params("StopUnit", "(ss)", unit, "replace")
+            self.svc_refresh()
+
+    def on_refresh(self, action, param):
+        self.svc_refresh()
+
+
+if __name__ == "__main__":
+    app = SvcGui()
+    app.run(sys.argv)
