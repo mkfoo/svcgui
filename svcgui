@@ -7,6 +7,8 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gio, GLib, Gtk
 from systemd import journal
 
+__version__ = "0.1.0"
+
 LABELS = ["Unit", "Description", "Loaded", "Active", "Sub"]
 
 FILTERS = ["service", "slice", "socket", "target", "timer"]
@@ -84,6 +86,7 @@ MENUBAR_XML = """
 class SvcGuiWindow(Gtk.ApplicationWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.set_icon_name("applications-system")
         self.svc_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.init_toolbar()
         self.init_list_view()
@@ -288,7 +291,7 @@ class SvcGui(Gtk.Application):
 
     def svc_dbus_call_w_params(self, method, vt, *args):
         if self.dryrun:
-            print(f"{method}({arg1},{arg2})")
+            self.window.svc_display_error(f"{method}{args}")
             return
 
         builder = GLib.VariantBuilder.new(GLib.VariantType.new(vt))
@@ -336,8 +339,12 @@ class SvcGui(Gtk.Application):
         return filename
 
     def on_about(self, action, param):
-        about_dialog = Gtk.AboutDialog(transient_for=self.window, modal=True)
-        about_dialog.present()
+        dialog = Gtk.AboutDialog(parent=self.window, modal=True)
+        dialog.set_logo_icon_name("applications-system")
+        dialog.set_version(__version__)
+        dialog.set_website("https://github.com/mkfoo/svcgui")
+        dialog.run()
+        dialog.destroy()
 
     def on_enable(self, action, param):
         filename = self.svc_choose_file("enable")
