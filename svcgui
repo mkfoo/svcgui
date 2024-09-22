@@ -11,7 +11,14 @@ LABELS = ["Unit", "Description", "Loaded", "Active", "Sub"]
 
 FILTERS = ["service", "slice", "socket", "target", "timer"]
 
-ACTIONS = ["about", "quit", "start", "restart", "stop", "refresh"]
+ACTIONS = ["about", "enable", "disable", "quit", "start", "restart", "stop", "refresh"]
+
+TOOLBAR_BUTTONS = [
+    ("media-playback-start", "start"),
+    ("media-seek-backward", "restart"),
+    ("media-playback-stop", "stop"),
+    ("view-refresh", "refresh"),
+]
 
 MENUBAR_XML = """
 <?xml version="1.0" encoding="UTF-8"?>
@@ -20,6 +27,14 @@ MENUBAR_XML = """
         <submenu>
             <attribute name="label">File</attribute>
             <section>
+                <item>
+                    <attribute name="label">Enable</attribute>
+                    <attribute name="action">app.enable</attribute>
+                </item>
+                <item>
+                    <attribute name="label">Disable</attribute>
+                    <attribute name="action">app.disable</attribute>
+                </item>
                 <item>
                     <attribute name="label">Quit</attribute>
                     <attribute name="action">app.quit</attribute>
@@ -79,34 +94,17 @@ class SvcGuiWindow(Gtk.ApplicationWindow):
     def init_toolbar(self):
         toolbar = Gtk.Toolbar.new()
 
-        btn = Gtk.ToolButton.new()
-        btn.set_icon_name("media-playback-start")
-        btn.set_tooltip_text("start")
-        btn.set_action_name("app.start")
-        toolbar.insert(btn, -1)
-
-        btn = Gtk.ToolButton.new()
-        btn.set_icon_name("media-seek-backward")
-        btn.set_tooltip_text("restart")
-        btn.set_action_name("app.restart")
-        toolbar.insert(btn, -1)
-
-        btn = Gtk.ToolButton.new()
-        btn.set_icon_name("media-playback-stop")
-        btn.set_tooltip_text("stop")
-        btn.set_action_name("app.stop")
-        toolbar.insert(btn, -1)
+        for icon, name in TOOLBAR_BUTTONS:
+            btn = Gtk.ToolButton.new()
+            btn.set_icon_name(icon)
+            btn.set_tooltip_text(name)
+            btn.set_action_name(f"app.{name}")
+            toolbar.insert(btn, -1)
 
         sep = Gtk.SeparatorToolItem.new()
         sep.set_draw(False)
         sep.set_expand(True)
-        toolbar.insert(sep, -1)
-
-        btn = Gtk.ToolButton.new()
-        btn.set_icon_name("view-refresh")
-        btn.set_tooltip_text("refresh")
-        btn.set_action_name("app.refresh")
-        toolbar.insert(btn, -1)
+        toolbar.insert(sep, 3)
 
         self.svc_box.pack_start(toolbar, False, False, 1)
 
@@ -157,11 +155,13 @@ class SvcGuiWindow(Gtk.ApplicationWindow):
         logwindow.set_min_content_height(200)
         self.svc_box.pack_start(logwindow, False, False, 1)
 
-    def svc_load_data(self, data):
+    def svc_reload_data(self, data):
+        self.svc_data.clear()
+
         for row in data:
             self.svc_data.append(row[:5])
 
-    def svc_reload_data(self, new_data):
+    def svc_refresh_data(self, new_data):
         for row in self.svc_data:
             name = row[0]
 
@@ -232,6 +232,7 @@ class SvcGui(Gtk.Application):
             **kwargs,
         )
 
+        self.data = None
         self.window = None
         self.add_main_option(
             "dryrun",
@@ -257,8 +258,7 @@ class SvcGui(Gtk.Application):
     def do_activate(self):
         if not self.window:
             self.window = SvcGuiWindow(application=self, title="svcgui")
-            data = self.svc_dbus_call("ListUnits")
-            self.window.svc_load_data(data)
+            self.svc_reload()
 
         self.window.show_all()
         self.window.present()
@@ -272,41 +272,101 @@ class SvcGui(Gtk.Application):
 
     def svc_dbus_call(self, method, args=None):
         try:
-            res = self.bus.call_sync(
+            return self.bus.call_sync(
                 "org.freedesktop.systemd1",
                 "/org/freedesktop/systemd1",
                 "org.freedesktop.systemd1.Manager",
                 method,
                 args,
                 None,
-                Gio.DBusCallFlags.NONE,
+                Gio.DBusCallFlags.ALLOW_INTERACTIVE_AUTHORIZATION,
                 -1,
                 None,
             )
-
-            if res and len(res):
-                return res[0]
-
-            return ()
         except Exception as e:
-            self.window.display_error(e)
+            self.window.svc_display_error(e)
 
-    def svc_dbus_call_w_params(self, method, vt, arg1, arg2):
+    def svc_dbus_call_w_params(self, method, vt, *args):
         if self.dryrun:
+            print(f"{method}({arg1},{arg2})")
             return
 
         builder = GLib.VariantBuilder.new(GLib.VariantType.new(vt))
-        builder.add_value(GLib.Variant.new_string(arg1))
-        builder.add_value(GLib.Variant.new_string(arg2))
-        self.svc_dbus_call(method, builder.end())
+
+        for arg in args:
+            builder.add_value(arg)
+
+        return self.svc_dbus_call(method, builder.end())
+
+    def svc_reload(self):
+        data = self.svc_dbus_call("ListUnits")
+        self.window.svc_reload_data(data[0])
 
     def svc_refresh(self):
-        data = dict((t[0], t) for t in self.svc_dbus_call("ListUnits"))
-        self.window.svc_reload_data(data)
+        data = self.svc_dbus_call("ListUnits")
+        data = dict((t[0], t) for t in data[0])
+        self.window.svc_refresh_data(data)
+
+    def svc_choose_file(self, action):
+        dialog = Gtk.FileChooserDialog(
+            title=f"Choose unit file to {action}",
+            parent=self.window,
+            action=Gtk.FileChooserAction.OPEN,
+        )
+
+        dialog.add_buttons(
+            Gtk.STOCK_CANCEL,
+            Gtk.ResponseType.CANCEL,
+            Gtk.STOCK_OPEN,
+            Gtk.ResponseType.OK,
+        )
+
+        filtr = Gtk.FileFilter()
+        filtr.set_name("systemd unit files")
+        filtr.add_mime_type("text/plain")
+        dialog.add_filter(filtr)
+
+        filename = None
+        response = dialog.run()
+
+        if response == Gtk.ResponseType.OK:
+            filename = dialog.get_filename()
+
+        dialog.destroy()
+        return filename
 
     def on_about(self, action, param):
         about_dialog = Gtk.AboutDialog(transient_for=self.window, modal=True)
         about_dialog.present()
+
+    def on_enable(self, action, param):
+        filename = self.svc_choose_file("enable")
+
+        if filename:
+            self.svc_dbus_call_w_params(
+                "EnableUnitFiles",
+                "(asbb)",
+                GLib.Variant.new_array(
+                    GLib.VariantType.new("s"), [GLib.Variant.new_string(filename)]
+                ),
+                GLib.Variant.new_boolean(False),
+                GLib.Variant.new_boolean(True),
+            )
+            self.svc_reload()
+
+    def on_disable(self, action, param):
+        filename = self.svc_choose_file("disable")
+
+        if filename:
+            self.svc_dbus_call_w_params(
+                "DisableUnitFiles",
+                "(asb)",
+                GLib.Variant.new_array(
+                    GLib.VariantType.new("s"), [GLib.Variant.new_string(filename)]
+                ),
+                GLib.Variant.new_boolean(False),
+            )
+            self.svc_reload()
 
     def on_quit(self, action, param):
         self.quit()
@@ -315,7 +375,12 @@ class SvcGui(Gtk.Application):
         unit = self.window.svc_get_selected()
 
         if unit:
-            self.svc_dbus_call_w_params("StartUnit", "(ss)", unit, "replace")
+            self.svc_dbus_call_w_params(
+                "StartUnit",
+                "(ss)",
+                GLib.Variant.new_string(unit),
+                GLib.Variant.new_string("replace"),
+            )
             self.svc_refresh()
 
     def on_restart(self, action, param):
@@ -323,7 +388,10 @@ class SvcGui(Gtk.Application):
 
         if unit:
             self.svc_dbus_call_w_params(
-                "ReloadOrTryRestartUnit", "(ss)", unit, "replace"
+                "ReloadOrTryRestartUnit",
+                "(ss)",
+                GLib.Variant.new_string(unit),
+                GLib.Variant.new_string("replace"),
             )
             self.svc_refresh()
 
@@ -331,7 +399,12 @@ class SvcGui(Gtk.Application):
         unit = self.window.svc_get_selected()
 
         if unit:
-            self.svc_dbus_call_w_params("StopUnit", "(ss)", unit, "replace")
+            self.svc_dbus_call_w_params(
+                "StopUnit",
+                "(ss)",
+                GLib.Variant.new_string(unit),
+                GLib.Variant.new_string("replace"),
+            )
             self.svc_refresh()
 
     def on_refresh(self, action, param):
