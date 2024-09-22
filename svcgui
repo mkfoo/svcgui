@@ -120,6 +120,7 @@ class SvcGuiWindow(Gtk.ApplicationWindow):
         self.svc_filter = self.svc_data.filter_new()
         self.svc_filter.set_visible_func(self.svc_filter_fn)
         sortable = Gtk.TreeModelSort(model=self.svc_filter)
+        sortable.set_sort_column_id(0, Gtk.SortType.ASCENDING)
         treeview = Gtk.TreeView(model=sortable)
 
         for i, label in enumerate(LABELS):
