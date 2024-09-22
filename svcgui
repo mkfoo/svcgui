@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from pathlib import Path
 import sys
 import gi
 
@@ -21,6 +22,8 @@ TOOLBAR_BUTTONS = [
     ("media-playback-stop", "stop"),
     ("view-refresh", "refresh"),
 ]
+
+DEFAULT_DIR = "/usr/local/lib/systemd/system"
 
 MENUBAR_XML = """
 <?xml version="1.0" encoding="UTF-8"?>
@@ -317,6 +320,9 @@ class SvcGui(Gtk.Application):
             action=Gtk.FileChooserAction.OPEN,
         )
 
+        if Path(DEFAULT_DIR).is_dir():
+            dialog.set_current_folder(DEFAULT_DIR)
+
         dialog.add_buttons(
             Gtk.STOCK_CANCEL,
             Gtk.ResponseType.CANCEL,
@@ -347,10 +353,11 @@ class SvcGui(Gtk.Application):
         dialog.destroy()
 
     def on_enable(self, action, param):
-        filename = self.svc_choose_file("enable")
+        path = self.svc_choose_file("enable")
 
-        if filename:
-            self.svc_dbus_call_w_params(
+        if path:
+            filename = Path(path).name
+            res = self.svc_dbus_call_w_params(
                 "EnableUnitFiles",
                 "(asbb)",
                 GLib.Variant.new_array(
@@ -359,13 +366,16 @@ class SvcGui(Gtk.Application):
                 GLib.Variant.new_boolean(False),
                 GLib.Variant.new_boolean(True),
             )
+            self.window.svc_display_error(res)
+            self.svc_dbus_call("Reload")
             self.svc_reload()
 
     def on_disable(self, action, param):
-        filename = self.svc_choose_file("disable")
+        path = self.svc_choose_file("disable")
 
-        if filename:
-            self.svc_dbus_call_w_params(
+        if path:
+            filename = Path(path).name
+            res = self.svc_dbus_call_w_params(
                 "DisableUnitFiles",
                 "(asb)",
                 GLib.Variant.new_array(
@@ -373,6 +383,8 @@ class SvcGui(Gtk.Application):
                 ),
                 GLib.Variant.new_boolean(False),
             )
+            self.window.svc_display_error(res)
+            self.svc_dbus_call("Reload")
             self.svc_reload()
 
     def on_quit(self, action, param):
